@@ -192,18 +192,19 @@ class STrack(BaseTrack):
         self.last_img = img.copy()
         if img is not None:
             x, y, w, h = map(int, self.tlwh)
-            patch = img[int(y+0.2*h):int(y+0.8*h), int(x+0.2*w):int(x+0.8*w)]
-            step = 15  # how densely to sample points
-            self.last_keypoints = cv2.goodFeaturesToTrack(
-                cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY), maxCorners=50, qualityLevel=0.01, minDistance=step)
-            patch_offset = np.array([[x + int(0.3 * w), y + int(0.3 * h)]])
             center_point = np.array([[[x + w // 2, y + h // 2]]], dtype=np.float32)
-
-            if self.last_keypoints is not None:
-                self.last_keypoints += patch_offset
-                self.last_keypoints = np.concatenate([self.last_keypoints, center_point], axis=0)
-            else:
-                self.last_keypoints = center_point
+            # patch = img[int(y+0.2*h):int(y+0.8*h), int(x+0.2*w):int(x+0.8*w)]
+            # step = 15  # how densely to sample points
+            # self.last_keypoints = cv2.goodFeaturesToTrack(
+            #     cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY), maxCorners=50, qualityLevel=0.01, minDistance=step)
+            # patch_offset = np.array([[x + int(0.3 * w), y + int(0.3 * h)]])
+            # center_point = np.array([[[x + w // 2, y + h // 2]]], dtype=np.float32)
+            #
+            # if self.last_keypoints is not None:
+            #     self.last_keypoints += patch_offset
+            #     self.last_keypoints = np.concatenate([self.last_keypoints, center_point], axis=0)
+            # else:
+            self.last_keypoints = center_point
 
     def convert_coords(self, tlwh: np.ndarray) -> np.ndarray:
         """Convert a bounding box's top-left-width-height format to its x-y-aspect-height equivalent."""
