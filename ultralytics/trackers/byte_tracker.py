@@ -1,8 +1,10 @@
 # Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+import copy
 
 from typing import Any, List, Optional, Tuple
-
+from copy import deepcopy
 import numpy as np
+import cv2
 
 from ..utils import LOGGER
 from ..utils.ops import xywh2ltwh
@@ -51,7 +53,7 @@ class STrack(BaseTrack):
 
     shared_kalman = KalmanFilterXYAH()
 
-    def __init__(self, xywh: List[float], score: float, cls: Any):
+    def __init__(self, xywh: List[float], score: float, cls: Any, img=None, feat=None):
         """
         Initialize a new STrack instance.
 
@@ -74,12 +76,13 @@ class STrack(BaseTrack):
         self.kalman_filter = None
         self.mean, self.covariance = None, None
         self.is_activated = False
-
+        self.gap = 1
         self.score = score
         self.tracklet_len = 0
         self.cls = cls
         self.idx = xywh[-1]
         self.angle = xywh[4] if len(xywh) == 6 else None
+        self.update_keypoints(img=img)
 
     def predict(self):
         """Predict the next state (mean and covariance) of the object using the Kalman filter."""
@@ -130,10 +133,11 @@ class STrack(BaseTrack):
 
         self.tracklet_len = 0
         self.state = TrackState.Tracked
-        if frame_id == 1:
+        if frame_id >= 1:
             self.is_activated = True
         self.frame_id = frame_id
         self.start_frame = frame_id
+        self.gap = 1
 
     def re_activate(self, new_track: "STrack", frame_id: int, new_id: bool = False):
         """Reactivate a previously lost track using new detection data and update its state and attributes."""
@@ -150,8 +154,9 @@ class STrack(BaseTrack):
         self.cls = new_track.cls
         self.angle = new_track.angle
         self.idx = new_track.idx
+        self.gap = 1
 
-    def update(self, new_track: "STrack", frame_id: int):
+    def update(self, new_track: "STrack", frame_id: int, img=None):
         """
         Update the state of a matched track.
 
@@ -179,10 +184,32 @@ class STrack(BaseTrack):
         self.cls = new_track.cls
         self.angle = new_track.angle
         self.idx = new_track.idx
+        self.gap = 1
+        self.last_bbox = new_tlwh
+        self.update_keypoints(img=img)
+
+    def update_keypoints(self, img):
+        self.last_img = img.copy()
+        if img is not None:
+            x, y, w, h = map(int, self.tlwh)
+            # patch = img[int(y+0.3*h):int(y+0.7*h), int(x+0.3*w):int(x+0.7*w)]
+            # step = 2  # how densely to sample points
+            # self.last_keypoints = cv2.goodFeaturesToTrack(
+            #     cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY), maxCorners=50, qualityLevel=0.01, minDistance=step)
+            #
+            # if self.last_keypoints is not None:
+            #     print(self.last_keypoints)
+            #     self.last_keypoints += np.array([[x + w // 2, y + h // 2]])
+            # else:
+            self.last_keypoints = np.array([[(x + w // 2, y + h // 2)]], dtype=np.float32)
 
     def convert_coords(self, tlwh: np.ndarray) -> np.ndarray:
         """Convert a bounding box's top-left-width-height format to its x-y-aspect-height equivalent."""
         return self.tlwh_to_xyah(tlwh)
+
+    def update_bbox(self, bbox_xywh):
+        """Update bbox manually, used for interpolated tracks."""
+        self._tlwh = np.asarray(bbox_xywh, dtype=np.float32)
 
     @property
     def tlwh(self) -> np.ndarray:
@@ -232,7 +259,7 @@ class STrack(BaseTrack):
 
     def __repr__(self) -> str:
         """Return a string representation of the STrack object including start frame, end frame, and track ID."""
-        return f"OT_{self.track_id}_({self.start_frame}-{self.end_frame})"
+        return f'OT_{self.track_id}_({self.start_frame}-{self.end_frame}-{self.xywh}-{"ACTIVATED" if self.is_activated else "UNACTIVATED"} - GAP - {self.gap})'
 
 
 class BYTETracker:
@@ -287,16 +314,18 @@ class BYTETracker:
         self.tracked_stracks = []  # type: List[STrack]
         self.lost_stracks = []  # type: List[STrack]
         self.removed_stracks = []  # type: List[STrack]
-
+        self.interpolated_tracks = [] # type: List[STrack]
         self.frame_id = 0
         self.args = args
         self.max_time_lost = int(frame_rate / 30.0 * args.track_buffer)
         self.kalman_filter = self.get_kalmanfilter()
         self.reset_id()
+        self.prev_img = None
 
     def update(self, results, img: Optional[np.ndarray] = None, feats: Optional[np.ndarray] = None) -> np.ndarray:
         """Update the tracker with new detections and return the current list of tracked objects."""
         self.frame_id += 1
+        self.gap = 1
         activated_stracks = []
         refind_stracks = []
         lost_stracks = []
@@ -306,6 +335,7 @@ class BYTETracker:
         bboxes = results.xywhr if hasattr(results, "xywhr") else results.xywh
         # Add index
         bboxes = np.concatenate([bboxes, np.arange(len(bboxes)).reshape(-1, 1)], axis=-1)
+        #print("dETECTED BBOXES INSIDE UPDATE", bboxes)
         cls = results.cls
 
         remain_inds = scores >= self.args.track_high_thresh
@@ -315,12 +345,13 @@ class BYTETracker:
         inds_second = inds_low & inds_high
         dets_second = bboxes[inds_second]
         dets = bboxes[remain_inds]
+
         scores_keep = scores[remain_inds]
         scores_second = scores[inds_second]
         cls_keep = cls[remain_inds]
         cls_second = cls[inds_second]
 
-        detections = self.init_track(dets, scores_keep, cls_keep, img if feats is None else feats)
+        detections = self.init_track(dets, scores_keep, cls_keep, features=img if feats is None else feats, img=img)
         # Add newly detected tracklets to tracked_stracks
         unconfirmed = []
         tracked_stracks = []  # type: List[STrack]
@@ -329,6 +360,7 @@ class BYTETracker:
                 unconfirmed.append(track)
             else:
                 tracked_stracks.append(track)
+        #print('tracked_stracks', tracked_stracks)
         # Step 2: First association, with high score detection boxes
         strack_pool = self.joint_stracks(tracked_stracks, self.lost_stracks)
         # Predict the current location with KF
@@ -343,28 +375,31 @@ class BYTETracker:
             STrack.multi_gmc(unconfirmed, warp)
 
         dists = self.get_dists(strack_pool, detections)
+
         matches, u_track, u_detection = matching.linear_assignment(dists, thresh=self.args.match_thresh)
 
         for itracked, idet in matches:
             track = strack_pool[itracked]
             det = detections[idet]
             if track.state == TrackState.Tracked:
-                track.update(det, self.frame_id)
+                track.update(det, self.frame_id, self.prev_img)
                 activated_stracks.append(track)
             else:
                 track.re_activate(det, self.frame_id, new_id=False)
                 refind_stracks.append(track)
         # Step 3: Second association, with low score detection boxes association the untrack to the low score detections
-        detections_second = self.init_track(dets_second, scores_second, cls_second, img if feats is None else feats)
+        detections_second = self.init_track(dets_second, scores_second, cls_second, features=img if feats is None else feats, img=img)
+
         r_tracked_stracks = [strack_pool[i] for i in u_track if strack_pool[i].state == TrackState.Tracked]
         # TODO
         dists = matching.iou_distance(r_tracked_stracks, detections_second)
         matches, u_track, u_detection_second = matching.linear_assignment(dists, thresh=0.5)
+
         for itracked, idet in matches:
             track = r_tracked_stracks[itracked]
             det = detections_second[idet]
             if track.state == TrackState.Tracked:
-                track.update(det, self.frame_id)
+                track.update(det, self.frame_id, self.prev_img)
                 activated_stracks.append(track)
             else:
                 track.re_activate(det, self.frame_id, new_id=False)
@@ -377,39 +412,109 @@ class BYTETracker:
                 lost_stracks.append(track)
         # Deal with unconfirmed tracks, usually tracks with only one beginning frame
         detections = [detections[i] for i in u_detection]
+
+
         dists = self.get_dists(unconfirmed, detections)
+
         matches, u_unconfirmed, u_detection = matching.linear_assignment(dists, thresh=0.7)
+
         for itracked, idet in matches:
-            unconfirmed[itracked].update(detections[idet], self.frame_id)
+            unconfirmed[itracked].update(detections[idet], self.frame_id, self.prev_img)
             activated_stracks.append(unconfirmed[itracked])
         for it in u_unconfirmed:
             track = unconfirmed[it]
             track.mark_removed()
             removed_stracks.append(track)
+        # === INTERPOLATE lost tracks with Kalman + Optical Flow ===
+
+
+        interpolated = []
+        interp_gap = 30
+        if img is not None:
+            for track in self.lost_stracks + lost_stracks :
+                track.update_keypoints(self.prev_img)
+                print('self.smooth_feat', track.smooth_feat.shape)
+
+                if not hasattr(track, 'gap'):
+                    track.gap = 1
+                else:
+                    track.gap += 1
+
+                if 1 <= track.gap <= interp_gap:
+                    try:
+                        # Optical flow forward from last_img → current img
+                        prev_gray = cv2.cvtColor(track.last_img, cv2.COLOR_BGR2GRAY)
+                        curr_gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                        next_pts, status, _ = cv2.calcOpticalFlowPyrLK(
+                            prev_gray, curr_gray, track.last_keypoints, None)
+
+                        valid = status[:, 0] == 1
+                        moved = next_pts[valid] - track.last_keypoints[valid]
+                       # print('MOVED', moved)
+                        shift = moved.mean(axis=0) if len(moved) > 0 else np.array([0., 0.])
+                        shift = shift[0]
+                       # print('SHIFT', shift)
+                        # Apply Kalman prediction (already done before matching)
+                        mean, covariance = track.mean.copy(), track.covariance.copy()
+                        #print('mean', mean)
+                        mean[0] += shift[0]  # x
+                        mean[1] += shift[1]  # y
+
+                        new_track = deepcopy(track)
+                        new_track.mean = mean
+                        new_track.covariance = covariance
+
+                        new_track.frame_id = self.frame_id
+                        new_track.is_activated = True
+                        new_track.state = TrackState.Tracked
+                        interpolated.append(new_track)
+                    except Exception as e:
+                        print(f"[interp flow] fail for ID {track.track_id}: {e}")
+                elif track.gap >= interp_gap + 1:
+                    track.mark_removed()
+                    removed_stracks.append(track)
+
+        print('INTERPOLATED', interpolated)
         # Step 4: Init new stracks
         for inew in u_detection:
+            #print('INIT NEW STRACK', detections[inew])
             track = detections[inew]
             if track.score < self.args.new_track_thresh:
                 continue
             track.activate(self.kalman_filter, self.frame_id)
+
             activated_stracks.append(track)
+
         # Step 5: Update state
         for track in self.lost_stracks:
             if self.frame_id - track.end_frame > self.max_time_lost:
                 track.mark_removed()
                 removed_stracks.append(track)
 
+        # delete deprecated and join updated
+        self.tracked_stracks = self.sub_stracks(self.tracked_stracks, interpolated)
+        self.tracked_stracks = self.joint_stracks(self.tracked_stracks, interpolated)
+
+
+       #print('self.tracked_stracks', self.tracked_stracks)
+        lost_stracks = self.sub_stracks(lost_stracks, interpolated)
         self.tracked_stracks = [t for t in self.tracked_stracks if t.state == TrackState.Tracked]
         self.tracked_stracks = self.joint_stracks(self.tracked_stracks, activated_stracks)
         self.tracked_stracks = self.joint_stracks(self.tracked_stracks, refind_stracks)
         self.lost_stracks = self.sub_stracks(self.lost_stracks, self.tracked_stracks)
         self.lost_stracks.extend(lost_stracks)
         self.lost_stracks = self.sub_stracks(self.lost_stracks, self.removed_stracks)
+        #self.lost_stracks = self.sub_stracks(self.lost_stracks, interpolated)
+        #print('BEFORE DEDUP self.tracked_stracks', self.tracked_stracks)
         self.tracked_stracks, self.lost_stracks = self.remove_duplicate_stracks(self.tracked_stracks, self.lost_stracks)
         self.removed_stracks.extend(removed_stracks)
+
+        # self.tracked_stracks = self.joint_stracks(self.tracked_stracks, interpolated)
+        # self.lost_stracks = self.sub_stracks(self.lost_stracks, interpolated)
         if len(self.removed_stracks) > 1000:
             self.removed_stracks = self.removed_stracks[-999:]  # clip remove stracks to 1000 maximum
-
+        print('Final tracks',  np.asarray([x.result for x in self.tracked_stracks if x.is_activated], dtype=np.float32))
+        self.prev_img = img
         return np.asarray([x.result for x in self.tracked_stracks if x.is_activated], dtype=np.float32)
 
     def get_kalmanfilter(self) -> KalmanFilterXYAH:
@@ -417,16 +522,19 @@ class BYTETracker:
         return KalmanFilterXYAH()
 
     def init_track(
-        self, dets: np.ndarray, scores: np.ndarray, cls: np.ndarray, img: Optional[np.ndarray] = None
+        self, dets: np.ndarray, scores: np.ndarray, cls: np.ndarray, img: Optional[np.ndarray] = None, features=None
     ) -> List[STrack]:
         """Initialize object tracking with given detections, scores, and class labels using the STrack algorithm."""
-        return [STrack(xyxy, s, c) for (xyxy, s, c) in zip(dets, scores, cls)] if len(dets) else []  # detections
+        return [STrack(xyxy, s, c, feat=features, img=img) for (xyxy, s, c) in zip(dets, scores, cls)] if len(dets) else []  # detections
 
     def get_dists(self, tracks: List[STrack], detections: List[STrack]) -> np.ndarray:
         """Calculate the distance between tracks and detections using IoU and optionally fuse scores."""
+        #print("IOU candidates", tracks, detections)
         dists = matching.iou_distance(tracks, detections)
+        #print("IOU distances", dists)
         if self.args.fuse_score:
             dists = matching.fuse_score(dists, detections)
+
         return dists
 
     def multi_predict(self, tracks: List[STrack]):

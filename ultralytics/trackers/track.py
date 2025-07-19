@@ -4,10 +4,12 @@ from functools import partial
 from pathlib import Path
 
 import torch
+import numpy as np
 
 from ultralytics.utils import YAML, IterableSimpleNamespace
 from ultralytics.utils.checks import check_yaml
-
+from ultralytics.engine.results import Results
+from ultralytics.engine.results import Boxes
 from .bot_sort import BOTSORT
 from .byte_tracker import BYTETracker
 
@@ -84,6 +86,7 @@ def on_predict_postprocess_end(predictor: object, persist: bool = False) -> None
     """
     is_obb = predictor.args.task == "obb"
     is_stream = predictor.dataset.mode == "stream"
+    #print('BBOXES', predictor.results[0].boxes)
     for i, result in enumerate(predictor.results):
         tracker = predictor.trackers[i if is_stream else 0]
         vid_path = predictor.save_dir / Path(result.path).name
@@ -92,14 +95,28 @@ def on_predict_postprocess_end(predictor: object, persist: bool = False) -> None
             predictor.vid_path[i if is_stream else 0] = vid_path
 
         det = (result.obb if is_obb else result.boxes).cpu().numpy()
+        #print("TYPE", type(result))
+        #print('OUTSIDE DET', det)
         tracks = tracker.update(det, result.orig_img, getattr(result, "feats", None))
-        if len(tracks) == 0:
-            continue
-        idx = tracks[:, -1].astype(int)
-        predictor.results[i] = result[idx]
-
-        update_args = {"obb" if is_obb else "boxes": torch.as_tensor(tracks[:, :-1])}
-        predictor.results[i].update(**update_args)
+        #print('OUTSIDE TRACKS', tracks)
+        if len(tracks) > 0:
+            print("TRACKS TO RES", tracks)
+            # [x1, y1, x2, y2, track_id, confidence, class, (optional), idx (in tracking only)].
+            predictor.results[i] = Results(
+                orig_img=result.orig_img,
+                path='image0.jpg',
+                names={int(i): 'person' for i in tracks[:, -1]},
+                boxes=torch.as_tensor(
+                    [
+                        [track[0], track[1], track[2], track[3],  track[4].astype(int), 1.0, 0,]
+                        for track in tracks
+                    ]),
+                masks=None,
+                probs=None,
+                keypoints=None,
+                obb=None,
+                speed={'preprocess': None, 'inference': None, 'postprocess': None},
+            )
 
 
 def register_tracker(model: object, persist: bool) -> None:

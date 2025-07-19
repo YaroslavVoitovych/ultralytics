@@ -53,7 +53,8 @@ class BOTrack(STrack):
     shared_kalman = KalmanFilterXYWH()
 
     def __init__(
-        self, tlwh: np.ndarray, score: float, cls: int, feat: Optional[np.ndarray] = None, feat_history: int = 50
+        self, tlwh: np.ndarray, score: float, cls: int, feat: Optional[np.ndarray] = None, feat_history: int = 50,
+            img=None
     ):
         """
         Initialize a BOTrack object with temporal parameters, such as feature history, alpha, and current features.
@@ -73,7 +74,7 @@ class BOTrack(STrack):
             >>> feat = np.random.rand(128)
             >>> bo_track = BOTrack(tlwh, score, cls, feat)
         """
-        super().__init__(tlwh, score, cls)
+        super().__init__(tlwh, score, cls, img=img)
 
         self.smooth_feat = None
         self.curr_feat = None
@@ -108,11 +109,11 @@ class BOTrack(STrack):
             self.update_features(new_track.curr_feat)
         super().re_activate(new_track, frame_id, new_id)
 
-    def update(self, new_track: "BOTrack", frame_id: int) -> None:
+    def update(self, new_track: "BOTrack", frame_id: int, img=None) -> None:
         """Update the track with new detection information and the current frame ID."""
         if new_track.curr_feat is not None:
             self.update_features(new_track.curr_feat)
-        super().update(new_track, frame_id)
+        super().update(new_track, frame_id, img=img)
 
     @property
     def tlwh(self) -> np.ndarray:
@@ -211,20 +212,23 @@ class BOTSORT(BYTETracker):
         return KalmanFilterXYWH()
 
     def init_track(
-        self, dets: np.ndarray, scores: np.ndarray, cls: np.ndarray, img: Optional[np.ndarray] = None
+        self, dets: np.ndarray, scores: np.ndarray, cls: np.ndarray, img: Optional[np.ndarray] = None, features = None
     ) -> List[BOTrack]:
         """Initialize object tracks using detection bounding boxes, scores, class labels, and optional ReID features."""
         if len(dets) == 0:
             return []
         if self.args.with_reid and self.encoder is not None:
-            features_keep = self.encoder(img, dets)
-            return [BOTrack(xyxy, s, c, f) for (xyxy, s, c, f) in zip(dets, scores, cls, features_keep)]  # detections
+            features_keep = self.encoder(features, dets)
+            print('FEATURES KEEP', features_keep[0].shape)
+            return [BOTrack(xyxy, s, c, feat=f, img=img) for (xyxy, s, c, f) in zip(dets, scores, cls, features_keep)]  # detections
         else:
-            return [BOTrack(xyxy, s, c) for (xyxy, s, c) in zip(dets, scores, cls)]  # detections
+            return [BOTrack(xyxy, s, c, img=img) for (xyxy, s, c) in zip(dets, scores, cls)]  # detections
 
     def get_dists(self, tracks: List[BOTrack], detections: List[BOTrack]) -> np.ndarray:
         """Calculate distances between tracks and detections using IoU and optionally ReID embeddings."""
+        #print('IOU distances:', tracks, detections)
         dists = matching.iou_distance(tracks, detections)
+        #print('IOU distances:', dists)
         dists_mask = dists > (1 - self.proximity_thresh)
 
         if self.args.fuse_score:
@@ -234,7 +238,9 @@ class BOTSORT(BYTETracker):
             emb_dists = matching.embedding_distance(tracks, detections) / 2.0
             emb_dists[emb_dists > (1 - self.appearance_thresh)] = 1.0
             emb_dists[dists_mask] = 1.0
+
             dists = np.minimum(dists, emb_dists)
+
         return dists
 
     def multi_predict(self, tracks: List[BOTrack]) -> None:
