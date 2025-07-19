@@ -193,18 +193,20 @@ class STrack(BaseTrack):
         if img is not None:
             x, y, w, h = map(int, self.tlwh)
             center_point = np.array([[[x + w // 2, y + h // 2]]], dtype=np.float32)
-            # patch = img[int(y+0.2*h):int(y+0.8*h), int(x+0.2*w):int(x+0.8*w)]
-            # step = 15  # how densely to sample points
-            # self.last_keypoints = cv2.goodFeaturesToTrack(
-            #     cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY), maxCorners=50, qualityLevel=0.01, minDistance=step)
-            # patch_offset = np.array([[x + int(0.3 * w), y + int(0.3 * h)]])
-            # center_point = np.array([[[x + w // 2, y + h // 2]]], dtype=np.float32)
-            #
-            # if self.last_keypoints is not None:
-            #     self.last_keypoints += patch_offset
-            #     self.last_keypoints = np.concatenate([self.last_keypoints, center_point], axis=0)
-            # else:
-            self.last_keypoints = center_point
+            patch = img[int(y+0.2*h):int(y+0.8*h), int(x+0.2*w):int(x+0.8*w)]
+            step = 4  # how densely to sample points
+            if patch.ndim == 3:
+                patch = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
+            self.last_keypoints = cv2.goodFeaturesToTrack(
+                patch, maxCorners=50, qualityLevel=0.1, minDistance=step)
+            patch_offset = np.array([[x + int(0.3 * w), y + int(0.3 * h)]])
+            center_point = np.array([[[x + w // 2, y + h // 2]]], dtype=np.float32)
+
+            if self.last_keypoints is not None:
+                self.last_keypoints += patch_offset
+                self.last_keypoints = np.concatenate([self.last_keypoints, center_point], axis=0)
+            else:
+                self.last_keypoints = center_point
 
     def convert_coords(self, tlwh: np.ndarray) -> np.ndarray:
         """Convert a bounding box's top-left-width-height format to its x-y-aspect-height equivalent."""
@@ -332,6 +334,7 @@ class BYTETracker:
             minEigThreshold=1e-4
             )
         self.interp_gap = 15
+        self.clahe = cv2.createCLAHE(clipLimit=1.0, tileGridSize=(8,8))
 
     def update(self, results, img: Optional[np.ndarray] = None, feats: Optional[np.ndarray] = None) -> np.ndarray:
         """Update the tracker with new detections and return the current list of tracked objects."""
@@ -440,7 +443,7 @@ class BYTETracker:
 
 
         interpolated = []
-
+        curr_gray = self.clahe.apply(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY))
         if img is not None:
             for track in self.lost_stracks + lost_stracks :
                 track.update_keypoints(self.prev_img)
@@ -453,8 +456,7 @@ class BYTETracker:
                 if 1 <= track.gap <= self.interp_gap:
                     try:
                         # Optical flow forward from last_img → current img
-                        prev_gray = cv2.cvtColor(track.last_img, cv2.COLOR_BGR2GRAY)
-                        curr_gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                        prev_gray = track.last_img
                         next_pts, status, _ = cv2.calcOpticalFlowPyrLK(
                             prev_gray, curr_gray, track.last_keypoints, None, **self.lk_params)
 
@@ -524,7 +526,7 @@ class BYTETracker:
         if len(self.removed_stracks) > 1000:
             self.removed_stracks = self.removed_stracks[-999:]  # clip remove stracks to 1000 maximum
         #print('Final tracks',  np.asarray([x.result for x in self.tracked_stracks if x.is_activated], dtype=np.float32))
-        self.prev_img = img
+        self.prev_img = curr_gray
         return np.asarray([x.result for x in self.tracked_stracks if x.is_activated], dtype=np.float32)
 
     def get_kalmanfilter(self) -> KalmanFilterXYAH:
