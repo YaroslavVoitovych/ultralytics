@@ -192,16 +192,18 @@ class STrack(BaseTrack):
         self.last_img = img.copy()
         if img is not None:
             x, y, w, h = map(int, self.tlwh)
-            # patch = img[int(y+0.3*h):int(y+0.7*h), int(x+0.3*w):int(x+0.7*w)]
-            # step = 2  # how densely to sample points
-            # self.last_keypoints = cv2.goodFeaturesToTrack(
-            #     cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY), maxCorners=50, qualityLevel=0.01, minDistance=step)
-            #
-            # if self.last_keypoints is not None:
-            #     print(self.last_keypoints)
-            #     self.last_keypoints += np.array([[x + w // 2, y + h // 2]])
-            # else:
-            self.last_keypoints = np.array([[(x + w // 2, y + h // 2)]], dtype=np.float32)
+            patch = img[int(y+0.2*h):int(y+0.8*h), int(x+0.2*w):int(x+0.8*w)]
+            step = 15  # how densely to sample points
+            self.last_keypoints = cv2.goodFeaturesToTrack(
+                cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY), maxCorners=50, qualityLevel=0.01, minDistance=step)
+            patch_offset = np.array([[x + int(0.3 * w), y + int(0.3 * h)]])
+            center_point = np.array([[[x + w // 2, y + h // 2]]], dtype=np.float32)
+
+            if self.last_keypoints is not None:
+                self.last_keypoints += patch_offset
+                self.last_keypoints = np.concatenate([self.last_keypoints, center_point], axis=0)
+            else:
+                self.last_keypoints = center_point
 
     def convert_coords(self, tlwh: np.ndarray) -> np.ndarray:
         """Convert a bounding box's top-left-width-height format to its x-y-aspect-height equivalent."""
@@ -321,6 +323,14 @@ class BYTETracker:
         self.kalman_filter = self.get_kalmanfilter()
         self.reset_id()
         self.prev_img = None
+        self.lk_params = dict(
+            winSize=(21, 21),
+            maxLevel=3,
+            criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01),
+            flags=cv2.OPTFLOW_LK_GET_MIN_EIGENVALS,
+            minEigThreshold=1e-4
+            )
+        self.interp_gap = 15
 
     def update(self, results, img: Optional[np.ndarray] = None, feats: Optional[np.ndarray] = None) -> np.ndarray:
         """Update the tracker with new detections and return the current list of tracked objects."""
@@ -364,7 +374,7 @@ class BYTETracker:
         # Step 2: First association, with high score detection boxes
         strack_pool = self.joint_stracks(tracked_stracks, self.lost_stracks)
         # Predict the current location with KF
-        self.multi_predict(strack_pool)
+        #self.multi_predict(strack_pool)
         if hasattr(self, "gmc") and img is not None:
             # use try-except here to bypass errors from gmc module
             try:
@@ -429,31 +439,30 @@ class BYTETracker:
 
 
         interpolated = []
-        interp_gap = 30
+
         if img is not None:
             for track in self.lost_stracks + lost_stracks :
                 track.update_keypoints(self.prev_img)
-                print('self.smooth_feat', track.smooth_feat.shape)
 
                 if not hasattr(track, 'gap'):
                     track.gap = 1
                 else:
                     track.gap += 1
 
-                if 1 <= track.gap <= interp_gap:
+                if 1 <= track.gap <= self.interp_gap:
                     try:
                         # Optical flow forward from last_img → current img
                         prev_gray = cv2.cvtColor(track.last_img, cv2.COLOR_BGR2GRAY)
                         curr_gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
                         next_pts, status, _ = cv2.calcOpticalFlowPyrLK(
-                            prev_gray, curr_gray, track.last_keypoints, None)
+                            prev_gray, curr_gray, track.last_keypoints, None, **self.lk_params)
 
                         valid = status[:, 0] == 1
                         moved = next_pts[valid] - track.last_keypoints[valid]
-                       # print('MOVED', moved)
+                        #print('MOVED', moved)
                         shift = moved.mean(axis=0) if len(moved) > 0 else np.array([0., 0.])
                         shift = shift[0]
-                       # print('SHIFT', shift)
+                        #print('SHIFT', shift)
                         # Apply Kalman prediction (already done before matching)
                         mean, covariance = track.mean.copy(), track.covariance.copy()
                         #print('mean', mean)
@@ -470,11 +479,11 @@ class BYTETracker:
                         interpolated.append(new_track)
                     except Exception as e:
                         print(f"[interp flow] fail for ID {track.track_id}: {e}")
-                elif track.gap >= interp_gap + 1:
+                elif track.gap >= self.interp_gap + 1:
                     track.mark_removed()
                     removed_stracks.append(track)
 
-        print('INTERPOLATED', interpolated)
+        #print('INTERPOLATED', interpolated)
         # Step 4: Init new stracks
         for inew in u_detection:
             #print('INIT NEW STRACK', detections[inew])
@@ -513,7 +522,7 @@ class BYTETracker:
         # self.lost_stracks = self.sub_stracks(self.lost_stracks, interpolated)
         if len(self.removed_stracks) > 1000:
             self.removed_stracks = self.removed_stracks[-999:]  # clip remove stracks to 1000 maximum
-        print('Final tracks',  np.asarray([x.result for x in self.tracked_stracks if x.is_activated], dtype=np.float32))
+        #print('Final tracks',  np.asarray([x.result for x in self.tracked_stracks if x.is_activated], dtype=np.float32))
         self.prev_img = img
         return np.asarray([x.result for x in self.tracked_stracks if x.is_activated], dtype=np.float32)
 
