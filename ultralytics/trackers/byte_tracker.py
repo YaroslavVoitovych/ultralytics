@@ -375,7 +375,7 @@ class BYTETracker:
         # Step 2: First association, with high score detection boxes
         strack_pool = self.joint_stracks(tracked_stracks, self.lost_stracks)
         # Predict the current location with KF
-        #self.multi_predict(strack_pool)
+        self.multi_predict(strack_pool)
         if hasattr(self, "gmc") and img is not None:
             # use try-except here to bypass errors from gmc module
             try:
