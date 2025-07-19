@@ -100,7 +100,7 @@ def on_predict_postprocess_end(predictor: object, persist: bool = False) -> None
         tracks = tracker.update(det, result.orig_img, getattr(result, "feats", None))
         #print('OUTSIDE TRACKS', tracks)
         if len(tracks) > 0:
-            print("TRACKS TO RES", tracks)
+            #print("TRACKS TO RES", tracks)
             # [x1, y1, x2, y2, track_id, confidence, class, (optional), idx (in tracking only)].
             predictor.results[i] = Results(
                 orig_img=result.orig_img,
