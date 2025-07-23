@@ -101,11 +101,11 @@ def on_predict_postprocess_end(predictor: object, persist: bool = False) -> None
         #print('OUTSIDE TRACKS', tracks)
         if len(tracks) > 0:
             #print("TRACKS TO RES", tracks)
-            # [x1, y1, x2, y2, track_id, confidence, class, (optional), idx (in tracking only)].
+            # [bbox.tolist()] + [self.track_id, self.score, self.cls, self.idx]
             predictor.results[i] = Results(
                 orig_img=result.orig_img,
                 path='image0.jpg',
-                names={int(i): 'person' for i in tracks[:, -1]},
+                names={int(i): 'person' for i in tracks[:, -2]},
                 boxes=torch.as_tensor(
                     [
                         [track[0], track[1], track[2], track[3],  track[4].astype(int), 1.0, 0,]
